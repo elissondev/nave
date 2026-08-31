@@ -1,0 +1,907 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Simulador de Voo Espacial Generativo</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            overflow: hidden;
+            font-family: 'Courier New', monospace;
+            background: #000;
+        }
+        #info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: #0ff;
+            font-size: 14px;
+            z-index: 100;
+            background: rgba(0,0,0,0.7);
+            padding: 15px;
+            border-radius: 5px;
+            border: 1px solid #0ff;
+        }
+        #crosshair {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 20px;
+            height: 20px;
+            border: 2px solid #f00;
+            border-radius: 50%;
+            pointer-events: none;
+            z-index: 100;
+        }
+        #crosshair::after {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 4px;
+            height: 4px;
+            background: #f00;
+            border-radius: 50%;
+        }
+        #health {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            color: #0f0;
+            font-size: 18px;
+            z-index: 100;
+            background: rgba(0,0,0,0.7);
+            padding: 10px;
+            border-radius: 5px;
+        }
+        #mode {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            color: #ff0;
+            font-size: 16px;
+            z-index: 100;
+            background: rgba(0,0,0,0.7);
+            padding: 10px;
+            border-radius: 5px;
+        }
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #fff;
+            font-size: 24px;
+            z-index: 200;
+        }
+    </style>
+</head>
+<body>
+    <div id="info">
+        <strong>CONTROLES:</strong><br>
+        W/S - Acelerar/Frear<br>
+        A/D - Girar Esquerda/Direita<br>
+        Q/E - Subir/Descer<br>
+        ESPAÇO - Pular (no chão)<br>
+        SHIFT - Correr<br>
+        MOUSE - Mirar<br>
+        CLIQUE - Atirar<br>
+        G - Entrar/Sair da Nave<br>
+        F - Entrar/Sair do Veículo<br>
+        TAB - Alternar Câmera<br>
+    </div>
+    <div id="crosshair"></div>
+    <div id="health">VIDA: 100%</div>
+    <div id="mode">MODO: VOANDO</div>
+    <div id="loading">Gerando Universo...</div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+
+        // === SISTEMA GENERATIVO ===
+        class GenerativeSystem {
+            constructor(seed = Math.random() * 10000) {
+                this.seed = seed;
+            }
+
+            random(min = 0, max = 1) {
+                const x = Math.sin(this.seed++) * 10000;
+                return min + (x - Math.floor(x)) * (max - min);
+            }
+
+            randomInt(min, max) {
+                return Math.floor(this.random(min, max + 1));
+            }
+
+            randomChoice(array) {
+                return array[this.randomInt(0, array.length - 1)];
+            }
+        }
+
+        // === CONFIGURAÇÃO PRINCIPAL ===
+        const config = {
+            planetCount: 5,
+            enemyCount: 20,
+            lifeformCount: 50,
+            treeCount: 100,
+            worldSize: 10000
+        };
+
+        // === VARIÁVEIS GLOBAIS ===
+        let scene, camera, renderer, controls;
+        let planets = [];
+        let enemies = [];
+        let lifeforms = [];
+        let trees = [];
+        let projectiles = [];
+        let player = {
+            health: 100,
+            mode: 'flying', // flying, walking, vehicle
+            velocity: new THREE.Vector3(),
+            onGround: false,
+            inShip: true,
+            inVehicle: false
+        };
+        let ship, currentVehicle;
+        let keys = {};
+        let mouseX = 0, mouseY = 0;
+        let lastTime = performance.now();
+        let gen;
+
+        // === INICIALIZAÇÃO ===
+        function init() {
+            gen = new GenerativeSystem();
+
+            // Cena
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x000011);
+            scene.fog = new THREE.FogExp2(0x000011, 0.0002);
+
+            // Câmera
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 50000);
+            camera.position.set(0, 100, 200);
+
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            document.body.appendChild(renderer.domElement);
+
+            // Controles
+            controls = new PointerLockControls(camera, document.body);
+            document.addEventListener('click', () => {
+                if (player.mode === 'walking' || player.mode === 'vehicle') {
+                    controls.lock();
+                }
+            });
+
+            // Event Listeners
+            document.addEventListener('keydown', onKeyDown);
+            document.addEventListener('keyup', onKeyUp);
+            document.addEventListener('mousedown', onMouseDown);
+            window.addEventListener('resize', onWindowResize);
+
+            // Luzes
+            const ambientLight = new THREE.AmbientLight(0x404040, 0.5);
+            scene.add(ambientLight);
+
+            const sunLight = new THREE.DirectionalLight(0xffffff, 1.5);
+            sunLight.position.set(1000, 1000, 500);
+            sunLight.castShadow = true;
+            scene.add(sunLight);
+
+            // Estrelas
+            createStars();
+
+            // Gerar Planetas
+            generatePlanets();
+
+            // Gerar Inimigos
+            generateEnemies();
+
+            // Gerar Vida
+            generateLifeforms();
+
+            // Gerar Vegetação
+            generateVegetation();
+
+            // Criar Nave
+            createShip();
+
+            // Remover loading
+            document.getElementById('loading').style.display = 'none';
+
+            // Loop principal
+            animate();
+        }
+
+        // === CRIAR ESTRELAS ===
+        function createStars() {
+            const starsGeometry = new THREE.BufferGeometry();
+            const starPositions = [];
+            const starColors = [];
+
+            for (let i = 0; i < 10000; i++) {
+                const x = (Math.random() - 0.5) * 40000;
+                const y = (Math.random() - 0.5) * 40000;
+                const z = (Math.random() - 0.5) * 40000;
+                starPositions.push(x, y, z);
+
+                const color = new THREE.Color();
+                color.setHSL(gen.random(0.5, 0.7), 0.8, gen.random(0.7, 1.0));
+                starColors.push(color.r, color.g, color.b);
+            }
+
+            starsGeometry.setAttribute('position', new THREE.Float32BufferAttribute(starPositions, 3));
+            starsGeometry.setAttribute('color', new THREE.Float32BufferAttribute(starColors, 3));
+
+            const starsMaterial = new THREE.PointsMaterial({
+                size: 2,
+                vertexColors: true,
+                transparent: true,
+                opacity: 0.8
+            });
+
+            const stars = new THREE.Points(starsGeometry, starsMaterial);
+            scene.add(stars);
+        }
+
+        // === GERAR PLANETAS ===
+        function generatePlanets() {
+            const planetTypes = [
+                { name: 'Terrestre', colorRange: [0.2, 0.4], hasAtmosphere: true, gravity: 9.8 },
+                { name: 'Desértico', colorRange: [0.1, 0.15], hasAtmosphere: false, gravity: 6.5 },
+                { name: 'Gelado', colorRange: [0.5, 0.7], hasAtmosphere: true, gravity: 8.2 },
+                { name: 'Vulcânico', colorRange: [0.0, 0.05], hasAtmosphere: true, gravity: 12.0 },
+                { name: 'Oceânico', colorRange: [0.55, 0.65], hasAtmosphere: true, gravity: 9.5 }
+            ];
+
+            for (let i = 0; i < config.planetCount; i++) {
+                const radius = gen.random(200, 800);
+                const distance = 2000 + i * 1500;
+                const angle = gen.random(0, Math.PI * 2);
+                
+                const planetType = gen.randomChoice(planetTypes);
+                const baseColor = gen.random(...planetType.colorRange);
+                const color = new THREE.Color().setHSL(baseColor, gen.random(0.5, 0.9), gen.random(0.3, 0.6));
+
+                // Planeta principal
+                const geometry = new THREE.SphereGeometry(radius, 64, 64);
+                
+                // Criar textura procedural
+                const canvas = document.createElement('canvas');
+                canvas.width = 512;
+                canvas.height = 512;
+                const ctx = canvas.getContext('2d');
+                
+                // Gradiente base
+                const gradient = ctx.createRadialGradient(256, 256, 0, 256, 256, 256);
+                gradient.addColorStop(0, color.getStyle());
+                gradient.addColorStop(1, new THREE.Color().setHSL(baseColor, gen.random(0.3, 0.7), gen.random(0.2, 0.4)).getStyle());
+                ctx.fillStyle = gradient;
+                ctx.fillRect(0, 0, 512, 512);
+
+                // Adicionar detalhes
+                for (let j = 0; j < 500; j++) {
+                    const x = gen.random(0, 512);
+                    const y = gen.random(0, 512);
+                    const r = gen.random(2, 20);
+                    ctx.beginPath();
+                    ctx.arc(x, y, r, 0, Math.PI * 2);
+                    ctx.fillStyle = `rgba(255,255,255,${gen.random(0.05, 0.2)})`;
+                    ctx.fill();
+                }
+
+                const texture = new THREE.CanvasTexture(canvas);
+                const material = new THREE.MeshStandardMaterial({
+                    map: texture,
+                    roughness: 0.8,
+                    metalness: 0.2
+                });
+
+                const planet = new THREE.Mesh(geometry, material);
+                planet.position.set(
+                    Math.cos(angle) * distance,
+                    gen.random(-500, 500),
+                    Math.sin(angle) * distance
+                );
+                planet.castShadow = true;
+                planet.receiveShadow = true;
+
+                // Dados do planeta
+                planet.userData = {
+                    name: `${planetType.name} ${i + 1}`,
+                    radius: radius,
+                    gravity: planetType.gravity,
+                    type: planetType.name,
+                    rotationSpeed: gen.random(0.001, 0.01),
+                    hasAtmosphere: planetType.hasAtmosphere
+                };
+
+                // Atmosfera
+                if (planetType.hasAtmosphere) {
+                    const atmGeometry = new THREE.SphereGeometry(radius * 1.05, 64, 64);
+                    const atmMaterial = new THREE.MeshBasicMaterial({
+                        color: new THREE.Color().setHSL(baseColor + 0.1, 0.8, 0.5),
+                        transparent: true,
+                        opacity: 0.3,
+                        side: THREE.BackSide
+                    });
+                    const atmosphere = new THREE.Mesh(atmGeometry, atmMaterial);
+                    planet.add(atmosphere);
+                }
+
+                // Anéis (aleatório)
+                if (gen.random() > 0.7) {
+                    const ringGeometry = new THREE.RingGeometry(radius * 1.3, radius * 2, 64);
+                    const ringMaterial = new THREE.MeshBasicMaterial({
+                        color: new THREE.Color().setHSL(gen.random(0.1, 0.3), 0.5, 0.6),
+                        transparent: true,
+                        opacity: 0.6,
+                        side: THREE.DoubleSide
+                    });
+                    const ring = new THREE.Mesh(ringGeometry, ringMaterial);
+                    ring.rotation.x = Math.PI / 2;
+                    planet.add(ring);
+                }
+
+                scene.add(planet);
+                planets.push(planet);
+            }
+
+            // Selecionar primeiro planeta como "base"
+            if (planets.length > 0) {
+                const basePlanet = planets[0];
+                basePlanet.position.set(0, 0, 0);
+                basePlanet.userData.radius = 500;
+                
+                // Terreno ao redor
+                createTerrain(basePlanet);
+            }
+        }
+
+        // === CRIAR TERRENO ===
+        function createTerrain(planet) {
+            const terrainSize = 2000;
+            const terrainSegments = 100;
+            
+            const geometry = new THREE.PlaneGeometry(terrainSize, terrainSize, terrainSegments, terrainSegments);
+            
+            // Gerar altura procedural
+            const positions = geometry.attributes.position.array;
+            for (let i = 0; i < positions.length; i += 3) {
+                const x = positions[i];
+                const y = positions[i + 1];
+                // Usar múltiplas octavas para ruído mais natural
+                let height = 0;
+                height += Math.sin(x * 0.01) * Math.cos(y * 0.01) * 50;
+                height += Math.sin(x * 0.03 + 1) * Math.cos(y * 0.03) * 20;
+                height += Math.sin(x * 0.1) * Math.cos(y * 0.1) * 5;
+                positions[i + 2] = height;
+            }
+            
+            geometry.computeVertexNormals();
+            
+            const material = new THREE.MeshStandardMaterial({
+                color: 0x3d8b3d,
+                roughness: 0.9,
+                flatShading: true
+            });
+            
+            const terrain = new THREE.Mesh(geometry, material);
+            terrain.rotation.x = -Math.PI / 2;
+            terrain.position.y = planet.userData.radius;
+            terrain.receiveShadow = true;
+            
+            scene.add(terrain);
+        }
+
+        // === GERAR INIMIGOS ===
+        function generateEnemies() {
+            const enemyColors = [0xff0000, 0xff6600, 0xff00ff, 0x8b0000];
+            
+            for (let i = 0; i < config.enemyCount; i++) {
+                const size = gen.random(2, 8);
+                const geometry = new THREE.BoxGeometry(size, size, size);
+                const material = new THREE.MeshStandardMaterial({
+                    color: gen.randomChoice(enemyColors),
+                    emissive: 0x330000,
+                    roughness: 0.5
+                });
+                
+                const enemy = new THREE.Mesh(geometry, material);
+                
+                // Posição aleatória
+                enemy.position.set(
+                    gen.random(-3000, 3000),
+                    gen.random(10, 500),
+                    gen.random(-3000, 3000)
+                );
+                
+                enemy.userData = {
+                    health: gen.randomInt(50, 150),
+                    speed: gen.random(0.5, 2),
+                    damage: gen.randomInt(10, 30),
+                    lastAttack: 0
+                };
+                
+                enemy.castShadow = true;
+                scene.add(enemy);
+                enemies.push(enemy);
+            }
+        }
+
+        // === GERAR FORMAS DE VIDA ===
+        function generateLifeforms() {
+            const lifeColors = [0x00ff00, 0x00ffff, 0xffff00, 0xff69b4, 0x9370db];
+            
+            for (let i = 0; i < config.lifeformCount; i++) {
+                const geometry = new THREE.SphereGeometry(gen.random(1, 3), 16, 16);
+                const material = new THREE.MeshStandardMaterial({
+                    color: gen.randomChoice(lifeColors),
+                    emissive: 0x111111,
+                    roughness: 0.3
+                });
+                
+                const lifeform = new THREE.Mesh(geometry, material);
+                
+                lifeform.position.set(
+                    gen.random(-2000, 2000),
+                    gen.random(5, 50),
+                    gen.random(-2000, 2000)
+                );
+                
+                lifeform.userData = {
+                    type: gen.random() > 0.5 ? 'passive' : 'neutral',
+                    moveSpeed: gen.random(0.1, 0.5),
+                    wanderRadius: gen.random(50, 200)
+                };
+                
+                scene.add(lifeform);
+                lifeforms.push(lifeform);
+            }
+        }
+
+        // === GERAR VEGETAÇÃO ===
+        function generateVegetation() {
+            for (let i = 0; i < config.treeCount; i++) {
+                const tree = createTree();
+                tree.position.set(
+                    gen.random(-1500, 1500),
+                    0,
+                    gen.random(-1500, 1500)
+                );
+                scene.add(tree);
+                trees.push(tree);
+            }
+        }
+
+        function createTree() {
+            const group = new THREE.Group();
+            
+            // Tronco
+            const trunkGeometry = new THREE.CylinderGeometry(1, 2, gen.random(10, 20), 8);
+            const trunkMaterial = new THREE.MeshStandardMaterial({ color: 0x8B4513 });
+            const trunk = new THREE.Mesh(trunkGeometry, trunkMaterial);
+            trunk.castShadow = true;
+            group.add(trunk);
+            
+            // Folhas
+            const leavesGeometry = new THREE.ConeGeometry(gen.random(5, 10), gen.random(10, 20), 8);
+            const leavesMaterial = new THREE.MeshStandardMaterial({ 
+                color: new THREE.Color().setHSL(gen.random(0.25, 0.35), 0.8, 0.3)
+            });
+            const leaves = new THREE.Mesh(leavesGeometry, leavesMaterial);
+            leaves.position.y = 15;
+            leaves.castShadow = true;
+            group.add(leaves);
+            
+            return group;
+        }
+
+        // === CRIAR NAVE ===
+        function createShip() {
+            ship = new THREE.Group();
+            
+            // Corpo principal
+            const bodyGeometry = new THREE.ConeGeometry(3, 10, 8);
+            const bodyMaterial = new THREE.MeshStandardMaterial({ 
+                color: 0x4444ff,
+                metalness: 0.8,
+                roughness: 0.2
+            });
+            const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+            body.rotation.x = Math.PI / 2;
+            ship.add(body);
+            
+            // Asas
+            const wingGeometry = new THREE.BoxGeometry(8, 0.5, 3);
+            const wing = new THREE.Mesh(wingGeometry, bodyMaterial);
+            wing.position.z = 2;
+            ship.add(wing);
+            
+            // Propulsor
+            const engineGeometry = new THREE.CylinderGeometry(1, 2, 3, 8);
+            const engineMaterial = new THREE.MeshStandardMaterial({ 
+                color: 0xff4444,
+                emissive: 0xff2200,
+                emissiveIntensity: 0.5
+            });
+            const engine = new THREE.Mesh(engineGeometry, engineMaterial);
+            engine.rotation.x = Math.PI / 2;
+            engine.position.z = -6;
+            ship.add(engine);
+            
+            // Luz do propulsor
+            const engineLight = new THREE.PointLight(0xff4400, 2, 20);
+            engineLight.position.z = -8;
+            ship.add(engineLight);
+            
+            ship.position.set(0, 10, 0);
+            ship.castShadow = true;
+            scene.add(ship);
+        }
+
+        // === CRIAR VEÍCULO TERRESTRE ===
+        function createVehicle() {
+            if (currentVehicle) return;
+            
+            currentVehicle = new THREE.Group();
+            
+            // Chassi
+            const chassisGeometry = new THREE.BoxGeometry(4, 2, 6);
+            const chassisMaterial = new THREE.MeshStandardMaterial({ 
+                color: 0x44aa44,
+                metalness: 0.6,
+                roughness: 0.4
+            });
+            const chassis = new THREE.Mesh(chassisGeometry, chassisMaterial);
+            currentVehicle.add(chassis);
+            
+            // Rodas
+            const wheelGeometry = new THREE.CylinderGeometry(1, 1, 0.5, 16);
+            const wheelMaterial = new THREE.MeshStandardMaterial({ color: 0x222222 });
+            
+            const wheelPositions = [
+                [-2.2, -0.5, 2],
+                [2.2, -0.5, 2],
+                [-2.2, -0.5, -2],
+                [2.2, -0.5, -2]
+            ];
+            
+            wheelPositions.forEach(pos => {
+                const wheel = new THREE.Mesh(wheelGeometry, wheelMaterial);
+                wheel.rotation.z = Math.PI / 2;
+                wheel.position.set(...pos);
+                currentVehicle.add(wheel);
+            });
+            
+            currentVehicle.position.set(50, 0, 50);
+            currentVehicle.castShadow = true;
+            scene.add(currentVehicle);
+        }
+
+        // === CONTROLES ===
+        function onKeyDown(event) {
+            keys[event.code] = true;
+            
+            if (event.code === 'KeyG') {
+                toggleShip();
+            }
+            
+            if (event.code === 'KeyF') {
+                toggleVehicle();
+            }
+            
+            if (event.code === 'Tab') {
+                event.preventDefault();
+                toggleCamera();
+            }
+        }
+
+        function onKeyUp(event) {
+            keys[event.code] = false;
+        }
+
+        function onMouseDown(event) {
+            if (controls.isLocked) {
+                shoot();
+            }
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // === AÇÕES DO JOGADOR ===
+        function toggleShip() {
+            if (player.inVehicle) return;
+            
+            player.inShip = !player.inShip;
+            
+            if (player.inShip) {
+                player.mode = 'flying';
+                ship.visible = true;
+                ship.position.copy(camera.position);
+                document.getElementById('mode').textContent = 'MODO: VOANDO';
+            } else {
+                player.mode = 'walking';
+                ship.visible = false;
+                document.getElementById('mode').textContent = 'MODO: ANDANDO';
+            }
+        }
+
+        function toggleVehicle() {
+            if (!currentVehicle) {
+                createVehicle();
+            }
+            
+            if (player.inShip) return;
+            
+            player.inVehicle = !player.inVehicle;
+            
+            if (player.inVehicle) {
+                player.mode = 'vehicle';
+                currentVehicle.visible = true;
+                currentVehicle.position.copy(camera.position);
+                document.getElementById('mode').textContent = 'MODO: VEÍCULO';
+            } else {
+                player.mode = 'walking';
+                currentVehicle.visible = false;
+                document.getElementById('mode').textContent = 'MODO: ANDANDO';
+            }
+        }
+
+        function toggleCamera() {
+            // Implementação futura para câmera em terceira pessoa
+        }
+
+        function shoot() {
+            const projectileGeometry = new THREE.SphereGeometry(0.5, 8, 8);
+            const projectileMaterial = new THREE.MeshBasicMaterial({ color: 0xffff00 });
+            const projectile = new THREE.Mesh(projectileGeometry, projectileMaterial);
+            
+            // Direção do tiro
+            const direction = new THREE.Vector3();
+            camera.getWorldDirection(direction);
+            
+            projectile.position.copy(camera.position);
+            projectile.userData = {
+                velocity: direction.multiplyScalar(50),
+                lifetime: 2
+            };
+            
+            scene.add(projectile);
+            projectiles.push(projectile);
+        }
+
+        // === FÍSICA E MOVIMENTO ===
+        function updatePlayer(delta) {
+            const speed = player.mode === 'flying' ? 50 : (player.mode === 'vehicle' ? 30 : 10);
+            const rotationSpeed = 2;
+            
+            if (player.mode === 'flying' && player.inShip) {
+                // Movimento da nave
+                if (keys['KeyW']) {
+                    const direction = new THREE.Vector3();
+                    camera.getWorldDirection(direction);
+                    player.velocity.add(direction.multiplyScalar(speed * delta));
+                }
+                if (keys['KeyS']) {
+                    const direction = new THREE.Vector3();
+                    camera.getWorldDirection(direction);
+                    player.velocity.sub(direction.multiplyScalar(speed * delta));
+                }
+                if (keys['KeyA']) {
+                    camera.rotation.y += rotationSpeed * delta;
+                }
+                if (keys['KeyD']) {
+                    camera.rotation.y -= rotationSpeed * delta;
+                }
+                if (keys['KeyQ']) {
+                    camera.position.y += speed * delta;
+                }
+                if (keys['KeyE']) {
+                    camera.position.y -= speed * delta;
+                }
+                
+                // Aplicar velocidade
+                camera.position.add(player.velocity.clone().multiplyScalar(delta));
+                player.velocity.multiplyScalar(0.98); // Resistência
+                
+                ship.position.copy(camera.position);
+                ship.quaternion.copy(camera.quaternion);
+                
+            } else if (player.mode === 'walking') {
+                // Movimento a pé
+                const forward = new THREE.Vector3();
+                camera.getWorldDirection(forward);
+                forward.y = 0;
+                forward.normalize();
+                
+                const right = new THREE.Vector3();
+                right.crossVectors(forward, new THREE.Vector3(0, 1, 0));
+                
+                if (keys['KeyW']) {
+                    camera.position.add(forward.multiplyScalar(speed * delta));
+                }
+                if (keys['KeyS']) {
+                    camera.position.sub(forward.multiplyScalar(speed * delta));
+                }
+                if (keys['KeyA']) {
+                    camera.position.sub(right.multiplyScalar(speed * delta));
+                }
+                if (keys['KeyD']) {
+                    camera.position.add(right.multiplyScalar(speed * delta));
+                }
+                if (keys['Space'] && player.onGround) {
+                    player.velocity.y = 10;
+                    player.onGround = false;
+                }
+                
+                // Gravidade
+                player.velocity.y -= 9.8 * delta;
+                camera.position.y += player.velocity.y * delta;
+                
+                // Colisão com o chão
+                if (camera.position.y < 10) {
+                    camera.position.y = 10;
+                    player.velocity.y = 0;
+                    player.onGround = true;
+                }
+                
+            } else if (player.mode === 'vehicle') {
+                // Movimento do veículo
+                if (keys['KeyW']) {
+                    const direction = new THREE.Vector3();
+                    camera.getWorldDirection(direction);
+                    direction.y = 0;
+                    direction.normalize();
+                    currentVehicle.position.add(direction.multiplyScalar(speed * delta));
+                    camera.position.copy(currentVehicle.position);
+                    camera.position.y = 5;
+                }
+                if (keys['KeyS']) {
+                    const direction = new THREE.Vector3();
+                    camera.getWorldDirection(direction);
+                    direction.y = 0;
+                    direction.normalize();
+                    currentVehicle.position.sub(direction.multiplyScalar(speed * delta));
+                    camera.position.copy(currentVehicle.position);
+                    camera.position.y = 5;
+                }
+                if (keys['KeyA']) {
+                    currentVehicle.rotation.y += rotationSpeed * delta;
+                    camera.rotation.y += rotationSpeed * delta;
+                }
+                if (keys['KeyD']) {
+                    currentVehicle.rotation.y -= rotationSpeed * delta;
+                    camera.rotation.y -= rotationSpeed * delta;
+                }
+            }
+        }
+
+        function updateEnemies(delta, time) {
+            enemies.forEach((enemy, index) => {
+                // Movimento simples em direção ao jogador
+                const direction = new THREE.Vector3();
+                direction.subVectors(camera.position, enemy.position).normalize();
+                
+                enemy.position.add(direction.multiplyScalar(enemy.userData.speed * delta));
+                enemy.rotation.y += delta;
+                
+                // Atacar jogador
+                const distance = enemy.position.distanceTo(camera.position);
+                if (distance < 20 && time - enemy.userData.lastAttack > 1) {
+                    player.health -= enemy.userData.damage;
+                    enemy.userData.lastAttack = time;
+                    updateHealthDisplay();
+                    
+                    if (player.health <= 0) {
+                        respawn();
+                    }
+                }
+            });
+        }
+
+        function updateLifeforms(delta) {
+            lifeforms.forEach(lifeform => {
+                // Movimento aleatório
+                lifeform.position.x += Math.sin(performance.now() * 0.001 + lifeform.id) * lifeform.userData.moveSpeed;
+                lifeform.position.z += Math.cos(performance.now() * 0.001 + lifeform.id) * lifeform.userData.moveSpeed;
+                
+                // Manter no chão
+                if (lifeform.position.y < 5) {
+                    lifeform.position.y = 5;
+                }
+            });
+        }
+
+        function updateProjectiles(delta) {
+            for (let i = projectiles.length - 1; i >= 0; i--) {
+                const projectile = projectiles[i];
+                projectile.position.add(projectile.userData.velocity.clone().multiplyScalar(delta));
+                projectile.userData.lifetime -= delta;
+                
+                // Colisão com inimigos
+                for (let j = enemies.length - 1; j >= 0; j--) {
+                    const enemy = enemies[j];
+                    if (projectile.position.distanceTo(enemy.position) < 5) {
+                        enemy.userData.health -= 25;
+                        
+                        if (enemy.userData.health <= 0) {
+                            scene.remove(enemy);
+                            enemies.splice(j, 1);
+                        }
+                        
+                        scene.remove(projectile);
+                        projectiles.splice(i, 1);
+                        break;
+                    }
+                }
+                
+                // Remover projéteis antigos
+                if (projectile.userData.lifetime <= 0 && projectiles.includes(projectile)) {
+                    scene.remove(projectile);
+                    projectiles.splice(i, 1);
+                }
+            }
+        }
+
+        function updateHealthDisplay() {
+            document.getElementById('health').textContent = `VIDA: ${Math.max(0, player.health)}%`;
+        }
+
+        function respawn() {
+            player.health = 100;
+            camera.position.set(0, 100, 200);
+            player.velocity.set(0, 0, 0);
+            updateHealthDisplay();
+        }
+
+        // === LOOP PRINCIPAL ===
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            const currentTime = performance.now();
+            const delta = (currentTime - lastTime) / 1000;
+            lastTime = currentTime;
+            
+            // Atualizar sistemas
+            updatePlayer(delta);
+            updateEnemies(delta, currentTime / 1000);
+            updateLifeforms(delta);
+            updateProjectiles(delta);
+            
+            // Rotacionar planetas
+            planets.forEach(planet => {
+                planet.rotation.y += planet.userData.rotationSpeed;
+            });
+            
+            renderer.render(scene, camera);
+        }
+
+        // Iniciar
+        init();
+    </script>
+</body>
+</html>
